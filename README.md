@@ -3,7 +3,7 @@ mailcheck
 
 This small Tcl script can be used to test whether relaying to email addresses is OK by connecting to their MX and getting to the RCPT TO: point.  Email addresses are read from stdin, one on each line.
 
-This software depends on the dns package from <a href="http://core.tcl.tk/tcllib/home">tcllib</a> and optionally on <a href="http://tcludp.sourceforge.net/">tcludp</a>, for UDP queries.
+This software depends on the <a href="http://tcllib.sourceforge.net/doc/tcllib_dns.html">dns</a> package from <a href="http://core.tcl.tk/tcllib/home">tcllib</a> and optionally on <a href="http://tcludp.sourceforge.net/">tcludp</a>, for UDP queries.
 
 
     Usage ./mailcheck [option ...]
