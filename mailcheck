@@ -1,0 +1,184 @@
+#!/usr/bin/env tclsh
+#
+#  Copyright (C) 2014 Pietro Cerutti <gahr@gahr.ch>
+#  
+#  Redistribution and use in source and binary forms, with or without
+#  modification, are permitted provided that the following conditions
+#  are met:
+#  1. Redistributions of source code must retain the above copyright
+#     notice, this list of conditions and the following disclaimer.
+#  2. Redistributions in binary form must reproduce the above copyright
+#     notice, this list of conditions and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+#  
+#  THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+#  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+#  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+#  ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+#  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+#  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+#  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+#  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+#  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+#  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+#  SUCH DAMAGE.
+#
+#
+# Test whether relaying to email addresses is OK by connecting to their MX
+# and getting to the RCPT TO: point.  Email addresses are read from stdin,
+# one on each line.
+#
+# This software depends on the dns package from tcllib [1] and optionally 
+# on tcludp [2], for UDP queries.
+#
+# [1] http://core.tcl.tk/tcllib/home
+# [2] http://tcludp.sourceforge.net/
+#
+# Usage ./mailcheck [option ...]
+#
+#   Options:
+#   --nameserver <host>     DNS
+#   --protocol   [tcp|udp]  Protocol for querying the DNS (default: tcp)
+#   --mailfrom   <email>    Envelop from email (default: user@hostname)
+#   --timeout    <seconds>  Connect timeout to the MX server (default: 3)
+#   --firstOnly             Stop iterating MX servers at the first OK
+#
+
+package require Tcl 8.5
+package require dns
+
+##
+# Globals
+array set conf [list \
+    nameserver  {} \
+    protocol    tcp \
+    mailfrom    "$::tcl_platform(user)@[info hostname]" \
+    timeout     3 \
+    firstOnly   0
+]
+set state {}
+
+proc init {} {
+    # initialize DNS
+    if {$::conf(protocol) eq {udp}} {
+        package require udp
+    }
+    ::dns::configure -protocol $::conf(protocol)
+    if {$::conf(nameserver) ne {}} {
+        ::dns::configure -nameserver $::conf(nameserver)
+    }
+
+    # initialize conf
+    set ::conf(envFrom) [lrange [split $::conf(mailfrom) @] 1 end]
+}
+
+proc sendcmd {sock {line {}}} {
+    if {$line ne {}} {
+        puts $sock $line
+    }
+
+    gets $sock line
+
+    if {![string match "2*" $line]} {
+        return -code error $line
+    }
+}
+
+proc say {msg} {
+    puts -nonewline $msg
+    flush stdout
+}
+
+proc mailcheck {email} {
+    set domain [lrange [split $email @] 1 end]
+
+    say "$email: "
+
+    # Lookup MX
+    if {[catch {set tok [::dns::resolve $domain -type MX]} err]} {
+        say "DNS error: $err\n"
+        return
+    }
+    if {[::dns::wait $tok] ne {ok}} {
+        say "[::dns::error $tok]\n"
+        return
+    }
+
+    # Sort entries per distance 
+    set entries [lsort -dictionary [::dns::name $tok]]
+    ::dns::cleanup $tok
+
+    # Iterate entries
+    foreach mx_entry $entries {
+        lassign $mx_entry mx_prio mx_addr
+
+        say "$mx_addr => "
+
+        # setup timeout
+        set ::timeoutId [after [expr {$::conf(timeout) * 1000}] {set ::state timeout}]
+
+        # connect to MX
+        set sock [socket -async $mx_addr 25]
+        chan event $sock w {after cancel ::timeoutId; set ::state connected}
+
+        vwait ::state
+        chan event $sock w {}
+
+        if {$::state eq {timeout}} {
+            catch {close $sock}
+            say "timeout. "
+            continue
+        }
+
+        chan configure $sock -buffering line
+
+        set enough 0
+        if {[catch {
+                sendcmd $sock
+                sendcmd $sock "HELO $::conf(envFrom)"
+                sendcmd $sock "MAIL FROM: <$::conf(mailfrom)>"
+                sendcmd $sock "RCPT TO: $email"
+            } err]} {
+            say "error ($err). "
+        } else {
+            say "ok. "
+            if {$::conf(firstOnly)} {
+                set enough 1
+            }
+        }
+
+        sendcmd $sock "QUIT"
+        catch {close $sock}
+
+        if {$enough} break
+    }
+
+    say "\n"
+}
+
+if {[info script] eq $argv0} {
+
+    # parse CLI arguments
+    set i 0
+    for {set i 0} {$i < $argc} {incr i} {
+        set arg [lindex $argv $i]
+        switch -- $arg {
+            --nameserver -
+            --protocol   -
+            --timeout    -
+            --mailfrom   {set conf([regsub -all -- {-} $arg {}]) [lindex $argv [incr i]]}
+            --firstOnly  {set conf([regsub -all -- {-} $arg {}]) 1}
+            default {
+                say "Invalid option: $arg\n"
+                exit 1
+            }
+        }
+    }
+
+    init
+
+    # check all email addresses found on stdin
+    while {[gets stdin line] != -1} {
+        mailcheck $line
+    }
+}
